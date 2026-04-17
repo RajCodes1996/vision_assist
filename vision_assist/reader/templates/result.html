@@ -1,0 +1,236 @@
+{% extends "base.html" %}
+
+{% block title %}Scan Result - Vision Assist{% endblock %}
+
+{% block content %}
+<section class="result-card">
+    <p class="eyebrow">Scan complete</p>
+    <h2>Extracted Text</h2>
+    <div id="resultBox" class="result-box" aria-live="polite">
+        {% if text %}
+            {{ text|linebreaks }}
+        {% else %}
+            No readable text was found in this image.
+        {% endif %}
+    </div>
+</section>
+
+<div class="action-row">
+    <button type="button" class="primary-btn" id="replayBtn">Replay Audio</button>
+    <button type="button" class="secondary-btn" id="simplifyBtn">Simplify Text</button>
+    <button type="button" class="text-btn" id="stopBtn">Stop Audio</button>
+    <a href="/" class="text-btn back-link">Back to Scan</a>
+</div>
+
+<div id="simplifyStatus" class="status-panel" aria-live="polite" hidden></div>
+
+{{ text|json_script:"ocr_text" }}
+
+<style>
+    .result-card h2 {
+        margin-bottom: 12px;
+        color: #f8fafc;
+        font-size: 1.7rem;
+    }
+
+    .eyebrow {
+        color: #93c5fd;
+        text-transform: uppercase;
+        letter-spacing: 0.18em;
+        font-size: 0.74rem;
+        margin-bottom: 8px;
+        font-weight: 700;
+    }
+
+    .action-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 16px;
+    }
+
+    .primary-btn,
+    .secondary-btn,
+    .text-btn {
+        border: 0;
+        border-radius: 999px;
+        cursor: pointer;
+        font-family: inherit;
+        font-weight: 700;
+        transition: transform 0.18s ease, box-shadow 0.18s ease;
+        text-decoration: none;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    .primary-btn,
+    .secondary-btn {
+        padding: 14px 22px;
+        font-size: 1rem;
+    }
+
+    .primary-btn {
+        color: #08111f;
+        background: linear-gradient(135deg, #93c5fd, #60a5fa);
+        box-shadow: 0 10px 24px rgba(59, 130, 246, 0.28);
+    }
+
+    .secondary-btn {
+        color: #e2e8f0;
+        background: rgba(59, 130, 246, 0.12);
+        border: 1px solid rgba(96, 165, 250, 0.28);
+    }
+
+    .text-btn {
+        padding: 12px 18px;
+        font-size: 0.95rem;
+        color: #cbd5e1;
+        background: transparent;
+        border: 1px solid rgba(148, 163, 184, 0.18);
+    }
+
+    .primary-btn:hover,
+    .secondary-btn:hover,
+    .text-btn:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 12px 28px rgba(15, 23, 42, 0.28);
+    }
+
+    .primary-btn:focus,
+    .secondary-btn:focus,
+    .text-btn:focus {
+        outline: 2px solid #93c5fd;
+        outline-offset: 2px;
+    }
+
+    .result-box {
+        white-space: pre-wrap;
+    }
+</style>
+
+<script>
+    const originalText = JSON.parse(document.getElementById('ocr_text').textContent || '""');
+    const resultBox = document.getElementById('resultBox');
+    const replayBtn = document.getElementById('replayBtn');
+    const simplifyBtn = document.getElementById('simplifyBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const simplifyStatus = document.getElementById('simplifyStatus');
+    let simplifiedText = null;
+    let showingSimplified = false;
+
+    function speak(text) {
+        if (!('speechSynthesis' in window)) {
+            return;
+        }
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.rate = 0.95;
+        const voices = window.speechSynthesis.getVoices();
+        const preferred = voices.find((voice) => voice.lang && voice.lang.startsWith('en')) || voices[0];
+        if (preferred) {
+            utterance.voice = preferred;
+        }
+        window.speechSynthesis.speak(utterance);
+    }
+
+    function stopSpeech() {
+        if ('speechSynthesis' in window) {
+            window.speechSynthesis.cancel();
+        }
+    }
+
+    function renderText(text) {
+        if (!text) {
+            resultBox.textContent = 'No readable text was found in this image.';
+            return;
+        }
+        resultBox.textContent = text;
+    }
+
+    function showStatus(message) {
+        simplifyStatus.hidden = false;
+        simplifyStatus.textContent = message;
+    }
+
+    function hideStatus() {
+        simplifyStatus.hidden = true;
+        simplifyStatus.textContent = '';
+    }
+
+    async function simplifyText() {
+        if (showingSimplified) {
+            showingSimplified = false;
+            renderText(originalText);
+            simplifyBtn.textContent = 'Simplify Text';
+            hideStatus();
+            return;
+        }
+
+        if (!originalText) {
+            showStatus('No text is available to simplify.');
+            return;
+        }
+
+        if (simplifiedText) {
+            showingSimplified = true;
+            renderText(simplifiedText);
+            simplifyBtn.textContent = 'Show Original';
+            showStatus('Simplified text is now displayed.');
+            speak(simplifiedText);
+            return;
+        }
+
+        simplifyBtn.disabled = true;
+        showStatus('Simplifying text...');
+
+        const csrfToken = document.cookie
+            .split('; ')
+            .find((row) => row.startsWith('csrftoken='))
+            ?.split('=')[1] || '';
+
+        try {
+            const response = await fetch('/simplify/', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': csrfToken,
+                },
+                body: JSON.stringify({ text: originalText }),
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || 'Could not simplify the text.');
+            }
+            simplifiedText = data.simplified || '';
+            showingSimplified = true;
+            renderText(simplifiedText);
+            simplifyBtn.textContent = 'Show Original';
+            showStatus('Simplified text is ready.');
+            speak(simplifiedText || 'No readable text was found.');
+        } catch (error) {
+            showStatus(error.message || 'Could not simplify the text.');
+        } finally {
+            simplifyBtn.disabled = false;
+        }
+    }
+
+    replayBtn.addEventListener('click', () => {
+        speak(showingSimplified ? simplifiedText : originalText || 'No readable text was found.');
+    });
+    simplifyBtn.addEventListener('click', simplifyText);
+    stopBtn.addEventListener('click', stopSpeech);
+
+    if ('speechSynthesis' in window) {
+        window.speechSynthesis.getVoices();
+        window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
+    }
+
+    renderText(originalText);
+    window.addEventListener('load', () => {
+        setTimeout(() => {
+            speak(originalText || 'No readable text was found.');
+        }, 500);
+    });
+</script>
+{% endblock %}
