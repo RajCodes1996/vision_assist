@@ -26,7 +26,7 @@ SECRET_KEY = 'django-insecure-o1f)=pn@s_!h#w)d&afvt42ujxhy=h7^355$u(_a#l0l1$8n!p
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ["127.0.0.1", "localhost", "vision-assist.onrender.com"]
 
 
 # Application definition
