@@ -1,10 +1,9 @@
 import json
-import os
 import re
 
 import cv2
+import easyocr
 import numpy as np
-import pytesseract
 from PIL import Image
 from django.http import JsonResponse
 from django.shortcuts import render
@@ -12,10 +11,9 @@ from django.views.decorators.http import require_POST
 
 from .models import Document
 
-# ── Tesseract binary path (works on Render/Linux and Windows) ──────────────
-pytesseract.pytesseract.tesseract_cmd = os.environ.get(
-    'TESSERACT_CMD', '/usr/bin/tesseract'
-)
+# ── EasyOCR reader (initialised once, reused for all requests) ─────────────
+# gpu=False is required on Render (no GPU available)
+_reader = easyocr.Reader(['en'], gpu=False)
 
 
 def _load_cv_image(image_path):
@@ -44,9 +42,7 @@ def _deskew_image(image):
     center = (w // 2, h // 2)
     matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
     return cv2.warpAffine(
-        image,
-        matrix,
-        (w, h),
+        image, matrix, (w, h),
         flags=cv2.INTER_CUBIC,
         borderMode=cv2.BORDER_REPLICATE,
     )
@@ -58,12 +54,9 @@ def _preprocess_for_ocr(image):
     gray = _deskew_image(cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR))
     gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
     thresh = cv2.adaptiveThreshold(
-        gray,
-        255,
+        gray, 255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY,
-        31,
-        15,
+        cv2.THRESH_BINARY, 31, 15,
     )
     return thresh
 
@@ -72,14 +65,15 @@ def extract_text(image_path):
     try:
         image = _load_cv_image(image_path)
         processed = _preprocess_for_ocr(image)
-        return pytesseract.image_to_string(processed, config='--oem 3 --psm 6')
+        results = _reader.readtext(processed, detail=0, paragraph=True)
+        return '\n'.join(results)
     except Exception:
-        img = Image.open(image_path)
-        return pytesseract.image_to_string(img)
+        results = _reader.readtext(image_path, detail=0, paragraph=True)
+        return '\n'.join(results)
 
 
 # ---------------------------------------------------------------------------
-# Lightweight rule-based text simplifier (no heavy ML model needed)
+# Lightweight rule-based text simplifier
 # ---------------------------------------------------------------------------
 COMPLEX_WORD_MAP = {
     r'\butilize\b': 'use', r'\bfacilitate\b': 'help', r'\bimplement\b': 'do',
@@ -112,7 +106,6 @@ def split_long_sentence(sentence, max_words=20):
     words = sentence.split()
     if len(words) <= max_words:
         return [sentence]
-
     split_points = [' and ', ' but ', ' because ', ' which ', ' that ', ' so ']
     for sp in split_points:
         if sp in sentence.lower():
@@ -139,7 +132,6 @@ def simplify_text_logic(text):
 # ---------------------------------------------------------------------------
 # Views
 # ---------------------------------------------------------------------------
-
 
 def wants_json_response(request):
     accept = request.headers.get('Accept', '')
@@ -179,7 +171,6 @@ def upload_image(request):
                 'text': text,
                 'image_url': doc.image.url,
             })
-
         return render(request, 'result.html', {'text': text})
 
     return render(request, 'upload.html')
