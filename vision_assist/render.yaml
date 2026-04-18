@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: vision_assist
+    runtime: python
+    buildCommand: pip install -r requirements.txt && python manage.py collectstatic --no-input && python manage.py migrate
+    startCommand: gunicorn vision_assist.wsgi:application
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: TESSERACT_CMD
+        value: /usr/bin/tesseract
+    packages:
+      - tesseract-ocr
+      - tesseract-ocr-eng
+      - libgl1
+      - libglib2.0-0
