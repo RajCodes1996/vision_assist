@@ -1,4 +1,5 @@
 import json
+import os
 import re
 
 import cv2
@@ -10,6 +11,11 @@ from django.shortcuts import render
 from django.views.decorators.http import require_POST
 
 from .models import Document
+
+# ── Tesseract binary path (works on Render/Linux and Windows) ──────────────
+pytesseract.pytesseract.tesseract_cmd = os.environ.get(
+    'TESSERACT_CMD', '/usr/bin/tesseract'
+)
 
 
 def _load_cv_image(image_path):
@@ -96,7 +102,6 @@ COMPLEX_WORD_MAP = {
 
 
 def simplify_sentence(sentence):
-    """Apply word-level simplifications to a single sentence."""
     result = sentence
     for pattern, replacement in COMPLEX_WORD_MAP.items():
         result = re.sub(pattern, replacement, result, flags=re.IGNORECASE)
@@ -104,7 +109,6 @@ def simplify_sentence(sentence):
 
 
 def split_long_sentence(sentence, max_words=20):
-    """Break a run-on sentence at conjunctions if it exceeds max_words."""
     words = sentence.split()
     if len(words) <= max_words:
         return [sentence]
@@ -121,7 +125,6 @@ def split_long_sentence(sentence, max_words=20):
 
 
 def simplify_text_logic(text):
-    """Full simplification pipeline."""
     raw_sentences = re.split(r'(?<=[.!?])\s+', text.strip())
     simplified_sentences = []
     for sent in raw_sentences:
@@ -162,7 +165,13 @@ def upload_image(request):
                 return JsonResponse({'error': 'No image provided.'}, status=400)
             return render(request, 'upload.html', {'error_message': 'No image provided.'})
 
-        doc, text = process_uploaded_image(image)
+        try:
+            doc, text = process_uploaded_image(image)
+        except Exception as e:
+            error_msg = str(e)
+            if wants_json_response(request):
+                return JsonResponse({'error': error_msg}, status=500)
+            return render(request, 'upload.html', {'error_message': error_msg})
 
         if wants_json_response(request):
             return JsonResponse({
@@ -178,7 +187,6 @@ def upload_image(request):
 
 @require_POST
 def simplify_view(request):
-    """AJAX endpoint: receives JSON {text: '...'} and returns simplified version."""
     try:
         body = json.loads(request.body)
         original = body.get('text', '').strip()
@@ -191,7 +199,6 @@ def simplify_view(request):
 
 
 def history_view(request):
-    """Returns the last scanned document as JSON for voice history command."""
     docs = Document.objects.exclude(extracted_text='').order_by('-id')[:1]
     results = [{'id': d.id, 'text': d.extracted_text[:500]} for d in docs]
     return JsonResponse({'history': results})
@@ -199,6 +206,5 @@ def history_view(request):
 
 @require_POST
 def clear_history(request):
-    """Deletes all scanned documents from the database."""
     count, _ = Document.objects.all().delete()
     return JsonResponse({'success': True, 'deleted': count})
