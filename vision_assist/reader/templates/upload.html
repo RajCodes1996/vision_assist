@@ -60,7 +60,7 @@
                 <li>Move closer if the text looks small.</li>
             </ul>
             <p class="camera-note">
-                OpenCV preprocessing will try to clean and deskew the image before OCR.
+                Camera capture now crops the scan window before OCR, then OpenCV cleans and deskews it.
             </p>
         </aside>
     </section>
@@ -529,6 +529,7 @@
     const cameraStage = document.getElementById('cameraStage');
     const cameraPreview = document.getElementById('cameraPreview');
     const captureCanvas = document.getElementById('captureCanvas');
+    const scanWindow = document.querySelector('.scan-window');
 
     let recognition = null;
     let listening = false;
@@ -675,13 +676,56 @@
         document.getElementById('cameraPlaceholder').style.display = 'grid';
     }
 
+    function clamp(value, min, max) {
+        return Math.min(Math.max(value, min), max);
+    }
+
     function captureFrame() {
-        const width = cameraPreview.videoWidth || 1280;
-        const height = cameraPreview.videoHeight || 720;
-        captureCanvas.width = width;
-        captureCanvas.height = height;
+        const videoWidth = cameraPreview.videoWidth || 1280;
+        const videoHeight = cameraPreview.videoHeight || 720;
+        const previewWrap = cameraPreview.parentElement;
+        const wrapRect = previewWrap.getBoundingClientRect();
+        const windowRect = scanWindow ? scanWindow.getBoundingClientRect() : wrapRect;
+
+        const scale = Math.max(
+            wrapRect.width / videoWidth,
+            wrapRect.height / videoHeight,
+        );
+        const renderedWidth = videoWidth * scale;
+        const renderedHeight = videoHeight * scale;
+        const offsetX = (renderedWidth - wrapRect.width) / 2;
+        const offsetY = (renderedHeight - wrapRect.height) / 2;
+        const sourceOffsetX = offsetX / scale;
+        const sourceOffsetY = offsetY / scale;
+
+        const paddingX = windowRect.width * 0.08;
+        const paddingY = windowRect.height * 0.08;
+        const leftInDisplay = clamp((windowRect.left - wrapRect.left) - paddingX, 0, wrapRect.width);
+        const topInDisplay = clamp((windowRect.top - wrapRect.top) - paddingY, 0, wrapRect.height);
+        const rightInDisplay = clamp((windowRect.right - wrapRect.left) + paddingX, 0, wrapRect.width);
+        const bottomInDisplay = clamp((windowRect.bottom - wrapRect.top) + paddingY, 0, wrapRect.height);
+
+        const sourceX = clamp(sourceOffsetX + (leftInDisplay / scale), 0, videoWidth - 1);
+        const sourceY = clamp(sourceOffsetY + (topInDisplay / scale), 0, videoHeight - 1);
+        const sourceWidth = clamp((rightInDisplay - leftInDisplay) / scale, 1, videoWidth - sourceX);
+        const sourceHeight = clamp((bottomInDisplay - topInDisplay) / scale, 1, videoHeight - sourceY);
+
+        const maxSide = 1600;
+        const scaleDown = Math.min(1, maxSide / Math.max(sourceWidth, sourceHeight));
+        captureCanvas.width = Math.max(1, Math.round(sourceWidth * scaleDown));
+        captureCanvas.height = Math.max(1, Math.round(sourceHeight * scaleDown));
         const context = captureCanvas.getContext('2d');
-        context.drawImage(cameraPreview, 0, 0, width, height);
+        context.drawImage(
+            cameraPreview,
+            sourceX,
+            sourceY,
+            sourceWidth,
+            sourceHeight,
+            0,
+            0,
+            captureCanvas.width,
+            captureCanvas.height,
+        );
         return new Promise((resolve, reject) => {
             captureCanvas.toBlob((blob) => {
                 if (blob) {
@@ -689,7 +733,7 @@
                 } else {
                     reject(new Error('Could not capture the camera frame.'));
                 }
-            }, 'image/jpeg', 0.92);
+            }, 'image/jpeg', 0.9);
         });
     }
 

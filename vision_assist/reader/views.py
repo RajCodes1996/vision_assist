@@ -1,19 +1,27 @@
 import json
 import re
+from statistics import mean
 
 import cv2
 import easyocr
 import numpy as np
-from PIL import Image
 from django.http import JsonResponse
 from django.shortcuts import render
 from django.views.decorators.http import require_POST
 
 from .models import Document
 
-# ── EasyOCR reader (initialised once, reused for all requests) ─────────────
-# gpu=False is required on Render (no GPU available)
+# EasyOCR reader initialised once and reused for all requests.
+# gpu=False is required on Render (no GPU available).
 _reader = easyocr.Reader(['en'], gpu=False)
+
+OCR_READ_KWARGS = {
+    'detail': 1,
+    'paragraph': False,
+    'decoder': 'greedy',
+    'batch_size': 1,
+    'workers': 0,
+}
 
 
 def _load_cv_image(image_path):
@@ -25,7 +33,11 @@ def _load_cv_image(image_path):
 
 def _deskew_image(image):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    coords = np.column_stack(np.where(gray < 240))
+    blur = cv2.GaussianBlur(gray, (3, 3), 0)
+    thresh = cv2.threshold(
+        blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+    )[1]
+    coords = np.column_stack(np.where(thresh > 0))
     if coords.size == 0:
         return image
 
@@ -48,28 +60,136 @@ def _deskew_image(image):
     )
 
 
-def _preprocess_for_ocr(image):
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    gray = cv2.bilateralFilter(gray, 9, 75, 75)
-    gray = _deskew_image(cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR))
-    gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
-    thresh = cv2.adaptiveThreshold(
-        gray, 255,
+def _resize_for_ocr(image, min_width=1200):
+    height, width = image.shape[:2]
+    if width >= min_width:
+        return image
+    scale = min_width / float(width)
+    new_size = (int(width * scale), int(height * scale))
+    return cv2.resize(image, new_size, interpolation=cv2.INTER_CUBIC)
+
+
+def _prepare_fast_variants(image):
+    base = _resize_for_ocr(image)
+    deskewed = _deskew_image(base)
+    gray = cv2.cvtColor(deskewed, cv2.COLOR_BGR2GRAY)
+
+    clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    adaptive = cv2.adaptiveThreshold(
+        enhanced, 255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY, 31, 15,
+        cv2.THRESH_BINARY, 31, 11,
     )
-    return thresh
+
+    return [
+        ('base', gray),
+        ('enhanced', enhanced),
+        ('adaptive', adaptive),
+    ]
+
+
+def _clean_ocr_text(text):
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
+def _compose_text_from_results(results):
+    if not results:
+        return '', 0.0
+
+    items = []
+    for bbox, text, confidence in results:
+        cleaned = text.strip()
+        if not cleaned:
+            continue
+        xs = [point[0] for point in bbox]
+        ys = [point[1] for point in bbox]
+        items.append({
+            'text': cleaned,
+            'x': min(xs),
+            'y': min(ys),
+            'h': max(ys) - min(ys),
+            'confidence': float(confidence or 0.0),
+        })
+
+    if not items:
+        return '', 0.0
+
+    items.sort(key=lambda item: (item['y'], item['x']))
+    lines = []
+    current_line = [items[0]]
+    current_y = items[0]['y']
+    current_h = max(items[0]['h'], 1)
+
+    for item in items[1:]:
+        y_gap = abs(item['y'] - current_y)
+        threshold = max(18, int(current_h * 0.75))
+        if y_gap > threshold:
+            lines.append(current_line)
+            current_line = [item]
+            current_y = item['y']
+            current_h = max(item['h'], 1)
+        else:
+            current_line.append(item)
+            current_y = min(current_y, item['y'])
+            current_h = max(current_h, item['h'])
+
+    lines.append(current_line)
+
+    formatted_lines = []
+    confidences = []
+    for line in lines:
+        ordered = sorted(line, key=lambda item: item['x'])
+        line_text = ' '.join(item['text'] for item in ordered).strip()
+        if line_text:
+            formatted_lines.append(line_text)
+            confidences.extend(item['confidence'] for item in ordered)
+
+    text = _clean_ocr_text('\n'.join(formatted_lines))
+    if not text:
+        return '', 0.0
+
+    alpha_ratio = sum(ch.isalnum() or ch.isspace() for ch in text) / max(len(text), 1)
+    score = (mean(confidences) if confidences else 0.0) * 100 + len(text) + alpha_ratio * 20
+    return text, score
+
+
+def _run_ocr(image):
+    fallback_text = ''
+    for index, (_, variant) in enumerate(_prepare_fast_variants(image)):
+        try:
+            results = _reader.readtext(variant, **OCR_READ_KWARGS)
+            text, score = _compose_text_from_results(results)
+            if text:
+                if index == 0:
+                    return text
+                if score >= 28:
+                    return text
+                fallback_text = text
+        except Exception:
+            continue
+
+    if fallback_text:
+        return fallback_text
+
+    results = _reader.readtext(image, **OCR_READ_KWARGS)
+    text, _ = _compose_text_from_results(results)
+    return text
 
 
 def extract_text(image_path):
     try:
         image = _load_cv_image(image_path)
-        processed = _preprocess_for_ocr(image)
-        results = _reader.readtext(processed, detail=0, paragraph=True)
-        return '\n'.join(results)
+        return _run_ocr(image)
     except Exception:
-        results = _reader.readtext(image_path, detail=0, paragraph=True)
-        return '\n'.join(results)
+        try:
+            results = _reader.readtext(image_path, **OCR_READ_KWARGS)
+            text, _ = _compose_text_from_results(results)
+            return text
+        except Exception:
+            return ''
 
 
 # ---------------------------------------------------------------------------
