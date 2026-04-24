@@ -41,7 +41,7 @@
                     <video id="cameraPreview" autoplay playsinline muted></video>
                     <div class="camera-overlay">
                         <div class="scan-window"></div>
-                        <div class="scan-hint">Keep the document flat and centered</div>
+                        <div id="scanHint" class="scan-hint">Keep the document flat and centered</div>
                     </div>
                     <div id="cameraPlaceholder" class="camera-placeholder">
                         Camera preview appears here when you tap Use Camera.
@@ -176,7 +176,7 @@
 
     .camera-workspace {
         display: grid;
-        grid-template-columns: minmax(0, 1.5fr) minmax(220px, 0.85fr);
+        grid-template-columns: minmax(0, 1.7fr) minmax(220px, 0.8fr);
         gap: 16px;
         align-items: stretch;
     }
@@ -216,9 +216,14 @@
         position: relative;
         border-radius: 18px;
         overflow: hidden;
-        min-height: 280px;
+        min-height: 400px;
         background: radial-gradient(circle at center, rgba(59, 130, 246, 0.15), rgba(2, 6, 23, 0.95));
         border: 1px solid rgba(148, 163, 184, 0.18);
+    }
+
+    .camera-preview-wrap.ready {
+        border-color: rgba(74, 222, 128, 0.38);
+        box-shadow: 0 0 0 1px rgba(74, 222, 128, 0.14), 0 0 26px rgba(74, 222, 128, 0.14);
     }
 
     .camera-stage-live {
@@ -230,7 +235,7 @@
     .camera-preview-wrap video {
         width: 100%;
         height: 100%;
-        min-height: 280px;
+        min-height: 400px;
         object-fit: cover;
         display: block;
         background: #020617;
@@ -245,14 +250,22 @@
     }
 
     .scan-window {
-        width: min(72%, 460px);
-        aspect-ratio: 1.55 / 1;
+        width: min(84%, 620px);
+        aspect-ratio: 1.42 / 1;
         border: 3px solid rgba(191, 219, 254, 0.9);
         border-radius: 18px;
         box-shadow:
             0 0 0 9999px rgba(2, 6, 23, 0.24),
             0 0 24px rgba(59, 130, 246, 0.26);
         position: absolute;
+    }
+
+    .scan-window.ready {
+        border-color: #4ade80;
+        box-shadow:
+            0 0 0 9999px rgba(2, 6, 23, 0.18),
+            0 0 0 4px rgba(74, 222, 128, 0.22),
+            0 0 28px rgba(74, 222, 128, 0.48);
     }
 
     .scan-hint {
@@ -266,6 +279,12 @@
         border: 1px solid rgba(148, 163, 184, 0.2);
         color: #e2e8f0;
         font-size: 0.88rem;
+    }
+
+    .scan-hint.ready {
+        color: #bbf7d0;
+        border-color: rgba(74, 222, 128, 0.35);
+        background: rgba(6, 95, 70, 0.76);
     }
 
     .camera-placeholder {
@@ -504,6 +523,11 @@
         .camera-panel-head {
             flex-direction: column;
         }
+
+        .camera-preview-wrap,
+        .camera-preview-wrap video {
+            min-height: 320px;
+        }
     }
 </style>
 
@@ -527,15 +551,23 @@
     const resultPanel = document.getElementById('resultPanel');
     const historyPanel = document.getElementById('historyPanel');
     const cameraStage = document.getElementById('cameraStage');
+    const cameraPreviewWrap = document.querySelector('.camera-preview-wrap');
     const cameraPreview = document.getElementById('cameraPreview');
     const captureCanvas = document.getElementById('captureCanvas');
     const scanWindow = document.querySelector('.scan-window');
+    const scanHint = document.getElementById('scanHint');
 
     let recognition = null;
     let listening = false;
     let scanBusy = false;
     let cameraStream = null;
     let welcomeSpoken = false;
+    let framingTimer = null;
+    let scanStableFrames = 0;
+    let lastCrop = null;
+    let autoCaptureQueued = false;
+    const framingCanvas = document.createElement('canvas');
+    const framingContext = framingCanvas.getContext('2d', { willReadFrequently: true });
 
     function getCsrfToken() {
         const cookie = document.cookie.split(';').find((part) => part.trim().startsWith('csrftoken='));
@@ -580,9 +612,11 @@
     function showCameraState(message) {
         cameraBanner.classList.add('show');
         setBanner(cameraBanner, message);
-        const chip = document.getElementById('cameraStatusChip');
-        if (chip) {
-            chip.textContent = message;
+        if (!cameraStage.classList.contains('alignment-mode')) {
+            const chip = document.getElementById('cameraStatusChip');
+            if (chip) {
+                chip.textContent = message;
+            }
         }
     }
 
@@ -592,6 +626,20 @@
         const chip = document.getElementById('cameraStatusChip');
         if (chip) {
             chip.textContent = 'Preview ready';
+        }
+    }
+
+    function setAlignmentState(isReady, message) {
+        scanWindow.classList.toggle('ready', isReady);
+        scanHint.classList.toggle('ready', isReady);
+        cameraPreviewWrap.classList.toggle('ready', isReady);
+        scanHint.textContent = message || (isReady ? 'Hold steady, capturing now' : 'Keep the document flat and centered');
+        const chip = document.getElementById('cameraStatusChip');
+        if (chip) {
+            chip.textContent = isReady ? 'Document aligned' : 'Adjust position';
+            chip.style.background = isReady ? 'rgba(74, 222, 128, 0.16)' : 'rgba(59, 130, 246, 0.14)';
+            chip.style.borderColor = isReady ? 'rgba(74, 222, 128, 0.32)' : 'rgba(96, 165, 250, 0.25)';
+            chip.style.color = isReady ? '#bbf7d0' : '#bfdbfe';
         }
     }
 
@@ -667,12 +715,24 @@
     }
 
     function stopCamera() {
+        if (framingTimer) {
+            clearInterval(framingTimer);
+            framingTimer = null;
+        }
+        autoCaptureQueued = false;
+        scanStableFrames = 0;
+        lastCrop = null;
         if (cameraStream) {
             cameraStream.getTracks().forEach((track) => track.stop());
             cameraStream = null;
         }
         cameraPreview.srcObject = null;
         cameraStage.classList.remove('active');
+        cameraStage.classList.remove('alignment-mode');
+        cameraPreviewWrap.classList.remove('ready');
+        scanWindow.classList.remove('ready');
+        scanHint.classList.remove('ready');
+        scanHint.textContent = 'Keep the document flat and centered';
         document.getElementById('cameraPlaceholder').style.display = 'grid';
     }
 
@@ -680,7 +740,7 @@
         return Math.min(Math.max(value, min), max);
     }
 
-    function captureFrame() {
+    function getCropGeometry() {
         const videoWidth = cameraPreview.videoWidth || 1280;
         const videoHeight = cameraPreview.videoHeight || 720;
         const previewWrap = cameraPreview.parentElement;
@@ -709,6 +769,135 @@
         const sourceY = clamp(sourceOffsetY + (topInDisplay / scale), 0, videoHeight - 1);
         const sourceWidth = clamp((rightInDisplay - leftInDisplay) / scale, 1, videoWidth - sourceX);
         const sourceHeight = clamp((bottomInDisplay - topInDisplay) / scale, 1, videoHeight - sourceY);
+
+        return { sourceX, sourceY, sourceWidth, sourceHeight };
+    }
+
+    function assessFrameCrop() {
+        const { sourceX, sourceY, sourceWidth, sourceHeight } = getCropGeometry();
+        const sampleWidth = 360;
+        const sampleHeight = Math.max(1, Math.round(sampleWidth * (sourceHeight / sourceWidth)));
+
+        framingCanvas.width = sampleWidth;
+        framingCanvas.height = sampleHeight;
+        framingContext.drawImage(
+            cameraPreview,
+            sourceX,
+            sourceY,
+            sourceWidth,
+            sourceHeight,
+            0,
+            0,
+            sampleWidth,
+            sampleHeight,
+        );
+
+        const imageData = framingContext.getImageData(0, 0, sampleWidth, sampleHeight);
+        const data = imageData.data;
+        const gray = new Uint8Array(sampleWidth * sampleHeight);
+        let sum = 0;
+        let sumSq = 0;
+
+        for (let i = 0, p = 0; i < data.length; i += 4, p += 1) {
+            const value = (data[i] * 0.299) + (data[i + 1] * 0.587) + (data[i + 2] * 0.114);
+            gray[p] = value;
+            sum += value;
+            sumSq += value * value;
+        }
+
+        const totalPixels = gray.length;
+        const mean = sum / totalPixels;
+        const variance = Math.max(0, (sumSq / totalPixels) - (mean * mean));
+        const stdDev = Math.sqrt(variance);
+
+        let edgeHits = 0;
+        let edgeSamples = 0;
+        const step = 2;
+        for (let y = step; y < sampleHeight - step; y += step) {
+            for (let x = step; x < sampleWidth - step; x += step) {
+                const index = (y * sampleWidth) + x;
+                const gx = Math.abs(gray[index + 1] - gray[index - 1]);
+                const gy = Math.abs(gray[index + sampleWidth] - gray[index - sampleWidth]);
+                if ((gx + gy) > 48) {
+                    edgeHits += 1;
+                }
+                edgeSamples += 1;
+            }
+        }
+
+        let motionDelta = 999;
+        if (lastCrop && lastCrop.length === gray.length) {
+            let totalDelta = 0;
+            for (let i = 0; i < gray.length; i += 5) {
+                totalDelta += Math.abs(gray[i] - lastCrop[i]);
+            }
+            motionDelta = totalDelta / (gray.length / 5);
+        }
+        lastCrop = gray;
+
+        const edgeDensity = edgeSamples ? (edgeHits / edgeSamples) : 0;
+        const inRangeLighting = mean > 45 && mean < 235;
+        const enoughDetail = stdDev > 18 && edgeDensity > 0.022;
+        const steady = motionDelta < 7;
+        const ready = inRangeLighting && enoughDetail && steady;
+
+        return {
+            ready,
+            mean,
+            stdDev,
+            edgeDensity,
+            motionDelta,
+        };
+    }
+
+    function stopFramingMonitor() {
+        if (framingTimer) {
+            clearInterval(framingTimer);
+            framingTimer = null;
+        }
+        autoCaptureQueued = false;
+        scanStableFrames = 0;
+        lastCrop = null;
+    }
+
+    async function captureWhenReady() {
+        if (autoCaptureQueued || !scanBusy) {
+            return;
+        }
+        autoCaptureQueued = true;
+        stopFramingMonitor();
+        setAlignmentState(true, 'Hold steady, capturing now');
+        showCameraState('Document aligned. Capturing now.');
+        speak('Document aligned. Capturing now.');
+        await new Promise((resolve) => setTimeout(resolve, 350));
+        const blob = await captureFrame();
+        await handleCapturedBlob(blob);
+    }
+
+    async function handleCapturedBlob(blob) {
+        try {
+            stopCamera();
+            showCameraState('Image captured. Extracting text now.');
+            speak('Image captured. Extracting text now.');
+            const data = await submitImageFile(blob, 'vision-assist-scan.jpg');
+            const text = (data.text || '').trim();
+            renderOCRText(text);
+            showVoiceState(text ? 'Reading text aloud.' : 'No readable text was found.');
+            speak(text ? `Reading text. ${text}` : 'I could not find readable text in the image.');
+            hideCameraState();
+        } catch (error) {
+            stopCamera();
+            showVoiceState(error.message || 'Scan failed.');
+            showCameraState(error.message || 'Scan failed.');
+            speak(error.message || 'Scan failed.');
+        } finally {
+            scanBusy = false;
+            setUploadBusy(false);
+        }
+    }
+
+    function captureFrame() {
+        const { sourceX, sourceY, sourceWidth, sourceHeight } = getCropGeometry();
 
         const maxSide = 1600;
         const scaleDown = Math.min(1, maxSide / Math.max(sourceWidth, sourceHeight));
@@ -801,35 +990,58 @@
         }
         scanBusy = true;
         setUploadBusy(true);
+        stopFramingMonitor();
+        setAlignmentState(false, 'Keep the document flat and centered');
         showVoiceState('Scanning mode activated.');
-        showCameraState('Please hold the document in front of the camera. Capture starts in a few seconds.');
-        speak('Scanning mode activated. Please hold the document in front of the camera. I will capture it automatically.');
+        showCameraState('Please hold the document inside the frame until the border turns green.');
+        speak('Scanning mode activated. Please hold the document inside the frame until the border turns green.');
 
         try {
             await ensureCamera();
-            showCameraState('Camera is ready. Hold the document steady.');
-            await new Promise((resolve) => setTimeout(resolve, origin === 'voice' ? 4000 : 2500));
-            showCameraState('Capturing now.');
-            speak('Capturing now.');
-            const blob = await captureFrame();
-            stopCamera();
-            showCameraState('Image captured. Extracting text now.');
-            speak('Image captured. Extracting text now.');
+            cameraStage.classList.add('alignment-mode');
+            showCameraState('Camera is ready. Align the page until the border turns green.');
+            if (origin === 'voice') {
+                speak('Camera is ready. Align the page until the border turns green.');
+            }
+            framingTimer = setInterval(() => {
+                if (!cameraStream || !cameraPreview.videoWidth || autoCaptureQueued) {
+                    return;
+                }
 
-            const data = await submitImageFile(blob, 'vision-assist-scan.jpg');
-            const text = (data.text || '').trim();
-            renderOCRText(text);
-            showVoiceState(text ? 'Reading text aloud.' : 'No readable text was found.');
-            speak(text ? `Reading text. ${text}` : 'I could not find readable text in the image.');
-            hideCameraState();
+                const result = assessFrameCrop();
+                if (result.ready) {
+                    scanStableFrames += 1;
+                    setAlignmentState(true, 'Hold steady, capturing now');
+                    showCameraState('Document aligned. Holding still before capture.');
+                } else {
+                    scanStableFrames = 0;
+                    setAlignmentState(false, 'Keep the document flat and centered');
+                    showCameraState('Move the document until the border turns green.');
+                }
+
+                if (scanStableFrames >= 4) {
+                    captureWhenReady().catch((error) => {
+                        stopCamera();
+                        stopFramingMonitor();
+                        scanBusy = false;
+                        setUploadBusy(false);
+                        showVoiceState(error.message || 'Scan failed.');
+                        showCameraState(error.message || 'Scan failed.');
+                        speak(error.message || 'Scan failed.');
+                    });
+                }
+            }, 250);
         } catch (error) {
             stopCamera();
+            stopFramingMonitor();
             showVoiceState(error.message || 'Scan failed.');
             showCameraState(error.message || 'Scan failed.');
             speak(error.message || 'Scan failed.');
         } finally {
-            scanBusy = false;
-            setUploadBusy(false);
+            if (!cameraStream) {
+                scanBusy = false;
+                setUploadBusy(false);
+            }
         }
     }
 
