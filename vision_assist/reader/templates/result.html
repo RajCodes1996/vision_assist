@@ -6,6 +6,7 @@
 <section class="result-card">
     <p class="eyebrow">Scan complete</p>
     <h2>Extracted Text</h2>
+    <p class="result-help">Say Replay Reading, Simplify Text, or go Back to Scan.</p>
     <div id="resultBox" class="result-box" aria-live="polite">
         {% if text %}
             {{ text|linebreaks }}
@@ -16,7 +17,7 @@
 </section>
 
 <div class="action-row">
-    <button type="button" class="primary-btn" id="replayBtn">Replay Audio</button>
+    <button type="button" class="primary-btn" id="replayBtn">Replay Reading</button>
     <button type="button" class="secondary-btn" id="simplifyBtn">Simplify Text</button>
     <button type="button" class="text-btn" id="stopBtn">Stop Audio</button>
     <a href="/" class="text-btn back-link">Back to Scan</a>
@@ -31,6 +32,12 @@
         margin-bottom: 12px;
         color: #f8fafc;
         font-size: 1.7rem;
+    }
+
+    .result-help {
+        color: var(--text-secondary);
+        line-height: 1.6;
+        margin-bottom: 16px;
     }
 
     .eyebrow {

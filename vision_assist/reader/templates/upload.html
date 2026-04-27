@@ -5,21 +5,32 @@
 {% block content %}
 <div class="scan-shell">
     <section class="intro-card">
-        <p class="eyebrow">Audio-first workflow</p>
-        <h2>Scan by voice, hear the text</h2>
+        <p class="eyebrow">Voice navigation mode</p>
+        <h2>Speak to scan, tap to listen</h2>
         <p class="intro-copy">
-            Use the camera to capture a page or upload any image from your device.
-            The extracted text is shown on screen and read aloud automatically.
+            Vision Assist now opens by speaking to you first. Say Start Camera, Upload Image, or Read Last Scan.
+            Tap anywhere on the screen if you want the app to listen.
         </p>
     </section>
 
+    <section class="command-strip" aria-label="Supported voice commands">
+        <span class="command-chip">Start Camera</span>
+        <span class="command-chip">Capture</span>
+        <span class="command-chip">Scan Document</span>
+        <span class="command-chip">Read Last Scan</span>
+        <span class="command-chip">Upload Image</span>
+    </section>
+
     <div class="action-row">
-        <button type="button" id="scanBtn" class="primary-btn" aria-label="Start automatic camera scan">
-            Use Camera
+        <button type="button" id="scanBtn" class="primary-btn" aria-label="Start the camera scanner">
+            Start Camera
         </button>
-        <button type="button" id="voiceBtn" class="secondary-btn" aria-label="Open voice guide and listen for commands">
+        <button type="button" id="voiceBtn" class="secondary-btn" aria-label="Open voice navigation and listen for commands">
             <span id="voiceIcon">Voice</span>
-            <span id="voiceLabel">Voice Guide</span>
+            <span id="voiceLabel">Listen</span>
+        </button>
+        <button type="button" id="repeatBtn" class="text-btn" aria-label="Repeat the spoken instructions">
+            Repeat Instructions
         </button>
         <button type="button" id="stopSpeechBtn" class="text-btn" aria-label="Stop audio playback">
             Stop Audio
@@ -58,6 +69,7 @@
                 <li>Use bright, even lighting.</li>
                 <li>Hold the camera steady for a second.</li>
                 <li>Move closer if the text looks small.</li>
+                <li>Tap anywhere to listen, long press to repeat, and double tap to confirm the last action.</li>
             </ul>
             <p class="camera-note">
                 Camera capture now crops the scan window before OCR, then OpenCV cleans and deskews it.
@@ -67,9 +79,9 @@
 
     <section class="upload-card">
         <div class="upload-copy">
-            <p class="card-label">Manual upload</p>
-            <h3>Upload an image from your device</h3>
-            <p>Choose a photo or screenshot, then we will extract the text and read it out loud.</p>
+            <p class="card-label">Fallback upload</p>
+            <h3>Choose a file if you prefer touch over voice</h3>
+            <p>Upload a photo or screenshot. Vision Assist will extract the text and read it aloud.</p>
         </div>
 
         <form id="imageUploadForm" class="upload-form">
@@ -164,6 +176,26 @@
         color: var(--text-secondary);
         line-height: 1.7;
         font-size: 0.98rem;
+    }
+
+    .command-strip {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+    }
+
+    .command-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        border-radius: 999px;
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        background: rgba(2, 6, 23, 0.24);
+        color: #dbeafe;
+        font-size: 0.86rem;
+        font-weight: 700;
+        letter-spacing: 0.02em;
     }
 
     .action-row,
@@ -333,6 +365,10 @@
         font-size: 1rem;
     }
 
+    .action-row .primary-btn {
+        min-width: 160px;
+    }
+
     .primary-btn {
         color: #08111f;
         background: linear-gradient(135deg, #93c5fd, #60a5fa);
@@ -343,6 +379,12 @@
         color: #e2e8f0;
         background: rgba(59, 130, 246, 0.12);
         border: 1px solid rgba(96, 165, 250, 0.28);
+    }
+
+    .secondary-btn.listening {
+        background: rgba(94, 160, 255, 0.2);
+        border-color: rgba(148, 196, 255, 0.45);
+        box-shadow: 0 0 0 1px rgba(94, 160, 255, 0.14), 0 0 24px rgba(94, 160, 255, 0.15);
     }
 
     .text-btn {
@@ -536,6 +578,7 @@
     const voiceBtn = document.getElementById('voiceBtn');
     const voiceIcon = document.getElementById('voiceIcon');
     const voiceLabel = document.getElementById('voiceLabel');
+    const repeatBtn = document.getElementById('repeatBtn');
     const historyBtn = document.getElementById('historyBtn');
     const clearHistoryBtn = document.getElementById('clearHistoryBtn');
     const stopSpeechBtn = document.getElementById('stopSpeechBtn');
@@ -566,8 +609,22 @@
     let scanStableFrames = 0;
     let lastCrop = null;
     let autoCaptureQueued = false;
+    let voiceGuideTimer = null;
+    let voiceGuideRepeats = 0;
+    let userHasInteracted = false;
+    let lastAction = null;
+    let lastTouchEndAt = 0;
+    let singleTapTimer = null;
+    let longPressTimer = null;
+    let longPressTriggered = false;
+    let touchStartX = 0;
+    let touchStartY = 0;
     const framingCanvas = document.createElement('canvas');
     const framingContext = framingCanvas.getContext('2d', { willReadFrequently: true });
+    const welcomePrompt = "Welcome to Vision Assist. Say Start Camera to scan a document, Upload Image to choose a file, or Read Last Scan to hear the previous result.";
+    const guidancePrompt = "Say Start Camera, Upload Image, Read Last Scan, Capture, or Scan Document. Tap anywhere to listen.";
+    const listeningPrompt = "Listening for your command. Say Start Camera, Upload Image, Read Last Scan, Capture, or Scan Document.";
+    const maxGuidanceRepeats = 3;
 
     function getCsrfToken() {
         const cookie = document.cookie.split(';').find((part) => part.trim().startsWith('csrftoken='));
@@ -602,6 +659,156 @@
         if ('speechSynthesis' in window) {
             window.speechSynthesis.cancel();
         }
+    }
+
+    function stopVoiceGuidanceLoop() {
+        if (voiceGuideTimer) {
+            clearTimeout(voiceGuideTimer);
+            voiceGuideTimer = null;
+        }
+    }
+
+    function markInteraction() {
+        userHasInteracted = true;
+        stopVoiceGuidanceLoop();
+    }
+
+    function queueVoiceGuidanceRepeat() {
+        stopVoiceGuidanceLoop();
+        if (userHasInteracted || voiceGuideRepeats >= maxGuidanceRepeats) {
+            return;
+        }
+
+        voiceGuideTimer = setTimeout(() => {
+            if (userHasInteracted || voiceGuideRepeats >= maxGuidanceRepeats) {
+                return;
+            }
+            voiceGuideRepeats += 1;
+            showVoiceState(guidancePrompt);
+            speak(guidancePrompt);
+            queueVoiceGuidanceRepeat();
+        }, 6000);
+    }
+
+    function startVoiceGuidanceLoop(resetCount = false) {
+        if (resetCount) {
+            voiceGuideRepeats = 0;
+        }
+        queueVoiceGuidanceRepeat();
+    }
+
+    function repeatInstructions() {
+        stopSpeech();
+        userHasInteracted = true;
+        stopVoiceGuidanceLoop();
+        showVoiceState(guidancePrompt);
+        speak(guidancePrompt);
+    }
+
+    function registerAction(label, handler) {
+        lastAction = {
+            label,
+            handler,
+        };
+    }
+
+    function normalizeTranscript(transcript) {
+        return transcript.toLowerCase().replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim();
+    }
+
+    function confirmLastAction() {
+        if (!lastAction || typeof lastAction.handler !== 'function') {
+            showVoiceState('No previous action is ready to confirm.');
+            speak('No previous action is ready to confirm. Say Start Camera, Upload Image, or Read Last Scan.');
+            return;
+        }
+
+        showVoiceState(`Confirming ${lastAction.label}.`);
+        speak(`Confirming ${lastAction.label}.`);
+        lastAction.handler();
+    }
+
+    function promptUploadPicker() {
+        markInteraction();
+        showVoiceState('Upload image selected. Choose a file now.');
+        speak('Upload image selected. Choose a file now.');
+        try {
+            imageInput.click();
+        } catch (error) {
+            showVoiceState('Tap the upload area to choose a file.');
+            speak('Tap the upload area to choose a file.');
+        }
+        registerAction('Upload Image', promptUploadPicker);
+    }
+
+    async function captureCurrentFrameNow() {
+        if (!cameraStream) {
+            showVoiceState('Open the camera first, then say Capture again.');
+            speak('Open the camera first, then say Capture again.');
+            return;
+        }
+
+        markInteraction();
+        scanBusy = true;
+        setUploadBusy(true);
+        stopFramingMonitor();
+        showCameraState('Capturing the current camera frame.');
+        speak('Capturing the current camera frame.');
+
+        try {
+            const blob = await captureFrame();
+            await handleCapturedBlob(blob);
+        } catch (error) {
+            stopCamera();
+            showVoiceState(error.message || 'Capture failed.');
+            showCameraState(error.message || 'Capture failed.');
+            speak(error.message || 'Capture failed.');
+        } finally {
+            scanBusy = false;
+            setUploadBusy(false);
+            registerAction('Capture', captureCurrentFrameNow);
+        }
+    }
+
+    function handleVoiceCommand(command) {
+        const normalized = normalizeTranscript(command);
+
+        if (!normalized) {
+            showVoiceState('I did not hear anything. Say Start Camera, Upload Image, or Read Last Scan.');
+            speak('I did not hear anything. Say Start Camera, Upload Image, or Read Last Scan.');
+            return;
+        }
+
+        if (normalized.includes('repeat instructions') || normalized === 'repeat' || normalized === 'help') {
+            repeatInstructions();
+            registerAction('Repeat Instructions', repeatInstructions);
+            return;
+        }
+
+        if (normalized.includes('read last scan') || normalized.includes('last scan') || normalized.includes('history') || normalized.includes('previous')) {
+            fetchLastHistory();
+            registerAction('Read Last Scan', fetchLastHistory);
+            return;
+        }
+
+        if (normalized.includes('upload image') || normalized === 'upload' || normalized.includes('choose file')) {
+            promptUploadPicker();
+            return;
+        }
+
+        if (normalized.includes('capture')) {
+            captureCurrentFrameNow();
+            return;
+        }
+
+        if (normalized.includes('scan document') || normalized.includes('start camera') || normalized.includes('camera') || normalized === 'scan') {
+            startScanFlow('voice');
+            registerAction('Start Camera', () => startScanFlow('voice'));
+            return;
+        }
+
+        showVoiceState(`Heard ${normalized}. Say Start Camera, Upload Image, or Read Last Scan.`);
+        speak(`Heard ${normalized}. Say Start Camera, Upload Image, or Read Last Scan.`);
     }
 
     function showVoiceState(message) {
@@ -649,10 +856,12 @@
             voiceBtn.classList.add('listening');
             voiceIcon.textContent = 'Hear';
             voiceLabel.textContent = 'Listening';
+            repeatBtn.disabled = true;
         } else {
             voiceBtn.classList.remove('listening');
             voiceIcon.textContent = 'Voice';
-            voiceLabel.textContent = 'Voice Guide';
+            voiceLabel.textContent = 'Listen';
+            repeatBtn.disabled = false;
         }
     }
 
@@ -661,6 +870,7 @@
         imageInput.disabled = isBusy;
         scanBtn.disabled = isBusy;
         voiceBtn.disabled = isBusy;
+        repeatBtn.disabled = isBusy;
         historyBtn.disabled = isBusy;
         clearHistoryBtn.disabled = isBusy;
     }
@@ -958,6 +1168,7 @@
     }
 
     async function fetchLastHistory() {
+        markInteraction();
         showVoiceState('Fetching your last scan.');
         showCameraState('Reading the previous result now.');
         try {
@@ -977,6 +1188,7 @@
             renderOCRText(text);
             speak(`Last scan result. ${text || 'No readable text was found.'}`);
             hideCameraState();
+            registerAction('Read Last Scan', fetchLastHistory);
         } catch (error) {
             showVoiceState('Could not load the last scan.');
             speak('I could not load the last scan.');
@@ -988,6 +1200,7 @@
         if (scanBusy) {
             return;
         }
+        markInteraction();
         scanBusy = true;
         setUploadBusy(true);
         stopFramingMonitor();
@@ -995,6 +1208,7 @@
         showVoiceState('Scanning mode activated.');
         showCameraState('Please hold the document inside the frame until the border turns green.');
         speak('Scanning mode activated. Please hold the document inside the frame until the border turns green.');
+        registerAction('Start Camera', () => startScanFlow(origin || 'button'));
 
         try {
             await ensureCamera();
@@ -1047,6 +1261,7 @@
 
     async function handleManualUpload(event) {
         event.preventDefault();
+        markInteraction();
         const file = imageInput.files && imageInput.files[0];
         if (!file) {
             showVoiceState('Please choose an image to upload.');
@@ -1065,6 +1280,7 @@
             showVoiceState(text ? 'Reading uploaded image text aloud.' : 'No readable text was found.');
             speak(text ? `Reading text. ${text}` : 'I could not find readable text in the uploaded image.');
             hideCameraState();
+            registerAction('Upload Image', promptUploadPicker);
         } catch (error) {
             showVoiceState(error.message || 'Upload failed.');
             showCameraState(error.message || 'Upload failed.');
@@ -1076,6 +1292,7 @@
 
     function startVoiceGuide() {
         const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+        markInteraction();
         if (!SR) {
             showVoiceState('Speech recognition is not available in this browser.');
             speak('Speech recognition is not available in this browser.');
@@ -1086,8 +1303,8 @@
             return;
         }
 
-        showVoiceState('Speaking instructions.');
-        speak('Say scan to start scanning, or history to hear the last result.', () => {
+        showVoiceState(listeningPrompt);
+        speak(listeningPrompt, () => {
             recognition = new SR();
             recognition.lang = 'en-US';
             recognition.interimResults = false;
@@ -1095,29 +1312,26 @@
 
             recognition.onstart = () => {
                 setListeningState(true);
-                showVoiceState('Listening. Say scan or history.');
+                showVoiceState(listeningPrompt);
             };
 
             recognition.onresult = (event) => {
-                const transcript = event.results[0][0].transcript.toLowerCase().trim();
-                if (transcript.includes('scan')) {
-                    startScanFlow('voice');
-                } else if (transcript.includes('history') || transcript.includes('past') || transcript.includes('previous')) {
-                    fetchLastHistory();
-                } else {
-                    showVoiceState(`Heard ${transcript}. Say scan or history.`);
-                    speak(`I heard ${transcript}. Say scan to start scanning, or history to hear the last result.`);
-                }
+                const transcript = event.results[0][0].transcript;
+                handleVoiceCommand(transcript);
             };
 
-            recognition.onerror = () => {
+            recognition.onerror = (event) => {
                 setListeningState(false);
-                showVoiceState('Could not hear you. Try again.');
-                speak('Could not hear you. Try again.');
+                const errorMessage = event && event.error === 'no-speech'
+                    ? 'I did not hear anything. Say Start Camera, Upload Image, or Read Last Scan.'
+                    : 'Could not hear you. Try again.';
+                showVoiceState(errorMessage);
+                speak(errorMessage);
             };
 
             recognition.onend = () => {
                 setListeningState(false);
+                recognition = null;
             };
 
             recognition.start();
@@ -1126,8 +1340,10 @@
 
     scanBtn.addEventListener('click', () => startScanFlow('button'));
     voiceBtn.addEventListener('click', startVoiceGuide);
+    repeatBtn.addEventListener('click', repeatInstructions);
     historyBtn.addEventListener('click', fetchLastHistory);
     stopSpeechBtn.addEventListener('click', () => {
+        markInteraction();
         stopSpeech();
         showVoiceState('Audio stopped.');
     });
@@ -1136,6 +1352,7 @@
         const file = imageInput.files && imageInput.files[0];
         updateFilePreview(file);
         if (file) {
+            registerAction('Upload Image', promptUploadPicker);
             showVoiceState(`Selected ${file.name}. Submit to extract the text.`);
         }
     });
@@ -1157,10 +1374,12 @@
             return;
         }
         setSelectedFiles(file);
+        registerAction('Upload Image', promptUploadPicker);
         showVoiceState(`Selected ${file.name}. Submit to extract the text.`);
     });
 
     clearHistoryBtn.addEventListener('click', async () => {
+        markInteraction();
         if (!confirm('Clear all scan history? This cannot be undone.')) {
             return;
         }
@@ -1189,6 +1408,78 @@
         }
     });
 
+    function isInteractiveTarget(target) {
+        return Boolean(target && target.closest && target.closest('button, a, input, label, textarea, select'));
+    }
+
+    function clearLongPressTimer() {
+        if (longPressTimer) {
+            clearTimeout(longPressTimer);
+            longPressTimer = null;
+        }
+    }
+
+    document.addEventListener('touchstart', (event) => {
+        if (isInteractiveTarget(event.target)) {
+            return;
+        }
+        const touch = event.changedTouches && event.changedTouches[0];
+        if (!touch) {
+            return;
+        }
+        touchStartX = touch.clientX;
+        touchStartY = touch.clientY;
+        longPressTriggered = false;
+        clearLongPressTimer();
+        longPressTimer = setTimeout(() => {
+            longPressTriggered = true;
+            repeatInstructions();
+        }, 650);
+    }, { passive: true });
+
+    document.addEventListener('touchmove', (event) => {
+        const touch = event.changedTouches && event.changedTouches[0];
+        if (!touch) {
+            return;
+        }
+        if (Math.abs(touch.clientX - touchStartX) > 12 || Math.abs(touch.clientY - touchStartY) > 12) {
+            clearLongPressTimer();
+        }
+    }, { passive: true });
+
+    document.addEventListener('touchend', (event) => {
+        if (isInteractiveTarget(event.target)) {
+            return;
+        }
+        clearLongPressTimer();
+        if (longPressTriggered) {
+            longPressTriggered = false;
+            return;
+        }
+
+        const now = Date.now();
+        if (now - lastTouchEndAt < 360) {
+            lastTouchEndAt = 0;
+            if (singleTapTimer) {
+                clearTimeout(singleTapTimer);
+                singleTapTimer = null;
+            }
+            confirmLastAction();
+            return;
+        }
+
+        lastTouchEndAt = now;
+        if (singleTapTimer) {
+            clearTimeout(singleTapTimer);
+        }
+        singleTapTimer = setTimeout(() => {
+            singleTapTimer = null;
+            startVoiceGuide();
+        }, 220);
+    }, { passive: true });
+
+    document.addEventListener('touchcancel', clearLongPressTimer, { passive: true });
+
     if ('speechSynthesis' in window) {
         window.speechSynthesis.getVoices();
         window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
@@ -1199,10 +1490,11 @@
             return;
         }
         welcomeSpoken = true;
-        showVoiceState('Ready. Use Camera, upload an image, or open the Voice Guide.');
-        setTimeout(() => {
-            speak('Vision Assist is ready. Use Camera for a live capture, or upload an image from your device. You can also open Voice Guide to say scan or history.');
-        }, 500);
+        userHasInteracted = false;
+        voiceGuideRepeats = 0;
+        showVoiceState(welcomePrompt);
+        speak(welcomePrompt);
+        startVoiceGuidanceLoop(true);
     });
 </script>
 {% endblock %}

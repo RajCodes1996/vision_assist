@@ -1,49 +1,68 @@
-❌ What’s Wrong in Your Current Design
+Your app already says “Audio-first workflow” — now you need to actually enforce it.
 
-Your app is still:
+🔊 1. App Should Speak Immediately (Auto Voice Guide)
+On app start:
 
-Visually guided (highlight, click, choose)
-Not truly audio-first
+As soon as the app loads, it should say:
 
-👉 Blind users don’t see states — they hear states
+“Welcome to Vision Assist. Say ‘Start Camera’ to scan a document or say ‘Upload Image’ to choose a file.”
 
-✅ Correct Approach: “Audio-First Interaction”
+How to implement:
 
-You need to redesign like this:
+Use:
 
-🧠 Rule:
+Text-to-Speech (TTS)
+Auto-trigger on page load
+const msg = new SpeechSynthesisUtterance(
+  "Welcome to Vision Assist. Say Start Camera or Upload Image."
+);
+speechSynthesis.speak(msg);
+🎤 2. Replace Buttons with Voice Commands (Primary Control)
 
-👉 Every action = clear voice guidance + auto execution
+Forget “Use Camera” button as main method.
 
-🔄 Fix Your “Scan” Feature (Proper Flow)
-🎤 User says:
+Instead:
 
-“Scan”
+User should say:
 
-🔊 App should respond:
+“Start camera”
+“Capture”
+“Scan document”
+“Read last scan”
+“Upload image”
+Use:
 
-Instead of:
+👉 Web Speech API (Speech Recognition)
 
-❌ “Upload area highlighted”
+const recognition = new webkitSpeechRecognition();
+recognition.onresult = (event) => {
+  const command = event.results[0][0].transcript.toLowerCase();
 
-Say:
+  if (command.includes("start camera")) {
+    startCamera();
+  }
+};
+recognition.start();
+🧭 3. Add “Voice Navigation Mode”
 
-✅ “Scanning mode activated. Please hold the document in front of the camera.”
+This is VERY important.
 
-📸 Then:
+When app starts:
 
-👉 Automatically:
+Guide user step-by-step:
 
-Open camera
-Capture image after 3–5 seconds
-🔊 Then:
+“Say ‘Camera’ to scan or ‘Upload’ to choose a file.”
 
-“Image captured. Extracting text now.”
+If user says nothing:
+👉 Repeat guidance every 5–7 seconds
 
-🔊 Then:
+👆 4. Touch-Based Blind Navigation (Fallback)
 
-“Reading text…”
+Even blind users use touch gestures.
 
-👉 Start TTS
+Add:
+Full screen tap anywhere → activate voice listening
+Long press → repeat instructions
+Double tap → confirm action
 
-💡 NO manual upload. NO visual instructions.
+👉 Don’t rely on small buttons

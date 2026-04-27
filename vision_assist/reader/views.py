@@ -5,9 +5,15 @@ from statistics import mean
 import cv2
 import easyocr
 import numpy as np
+from PIL import Image
 from django.http import JsonResponse
 from django.shortcuts import render
 from django.views.decorators.http import require_POST
+
+try:
+    import pytesseract
+except Exception:  # pragma: no cover - optional dependency fallback
+    pytesseract = None
 
 from .models import Document
 
@@ -21,6 +27,36 @@ OCR_READ_KWARGS = {
     'decoder': 'greedy',
     'batch_size': 1,
     'workers': 0,
+    'contrast_ths': 0.1,
+    'adjust_contrast': 0.5,
+    'text_threshold': 0.6,
+    'low_text': 0.3,
+    'link_threshold': 0.4,
+    'mag_ratio': 1.2,
+    'canvas_size': 1600,
+}
+
+ALPHA_STRAY_DIGIT_RE = re.compile(r'^(?P<word>[A-Za-z]{2,})\s+(?P<digit>\d)$')
+ALPHA_ATTACHED_DIGIT_RE = re.compile(r'^(?P<word>[A-Za-z]{2,})(?P<digit>\d)$')
+
+TESSERACT_CONFIG = '--oem 3 --psm 6'
+FAST_OCR_SCORE = 78
+
+TECH_PHRASES = {
+    ('machine', 'learning'),
+    ('deep', 'learning'),
+    ('natural', 'language'),
+    ('neural', 'network'),
+    ('image', 'processing'),
+    ('object', 'detection'),
+    ('feature', 'extraction'),
+    ('text', 'classification'),
+    ('speech', 'recognition'),
+    ('reinforcement', 'learning'),
+    ('supervised', 'learning'),
+    ('unsupervised', 'learning'),
+    ('data', 'science'),
+    ('computer', 'vision'),
 }
 
 
@@ -69,23 +105,19 @@ def _resize_for_ocr(image, min_width=1200):
     return cv2.resize(image, new_size, interpolation=cv2.INTER_CUBIC)
 
 
-def _prepare_fast_variants(image):
-    base = _resize_for_ocr(image)
+def _prepare_ocr_variants(image):
+    base = _resize_for_ocr(image, min_width=1200)
     deskewed = _deskew_image(base)
     gray = cv2.cvtColor(deskewed, cv2.COLOR_BGR2GRAY)
 
     clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8))
     enhanced = clahe.apply(gray)
-    adaptive = cv2.adaptiveThreshold(
-        enhanced, 255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY, 31, 11,
-    )
+    denoised = cv2.GaussianBlur(enhanced, (3, 3), 0)
 
     return [
         ('base', gray),
         ('enhanced', enhanced),
-        ('adaptive', adaptive),
+        ('denoised', denoised),
     ]
 
 
@@ -93,6 +125,79 @@ def _clean_ocr_text(text):
     text = re.sub(r'[ \t]+', ' ', text)
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
+
+
+def _score_text_candidate(text, confidences):
+    if not text:
+        return 0.0
+
+    alpha_ratio = sum(ch.isalnum() or ch.isspace() for ch in text) / max(len(text), 1)
+    letters = sum(ch.isalpha() for ch in text)
+    digits = sum(ch.isdigit() for ch in text)
+    punctuation = sum(not ch.isalnum() and not ch.isspace() for ch in text)
+    score = (mean(confidences) if confidences else 0.0) * 100
+    score += len(text) * 2
+    score += alpha_ratio * 24
+    if digits == 0:
+        score += 8
+    if text.isalpha():
+        score += 18
+    if letters >= 3 and digits == 1:
+        score -= 14
+    if letters >= 3 and digits > 1:
+        score -= 22
+    if len(text.split()) == 1 and text.isalpha() and len(text) <= 10:
+        score += 10
+    score -= punctuation * 5
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) == 1:
+        line = lines[0]
+        if ALPHA_STRAY_DIGIT_RE.fullmatch(line) or ALPHA_ATTACHED_DIGIT_RE.fullmatch(line):
+            score -= 45
+
+    return score
+
+
+def _normalize_short_label_noise(line, items):
+    tokens = line.split()
+    if len(tokens) != 2:
+        return line
+
+    first, second = tokens
+    if not first.isalpha():
+        return line
+
+    if len(first) < 2:
+        return line
+
+    if second.isdigit() and len(second) == 1:
+        digit_conf = items[-1]['confidence'] if items else 0.0
+        if digit_conf < 0.85:
+            return first
+
+    return line
+
+
+def _normalize_technical_phrase_order(line):
+    tokens = line.split()
+    if len(tokens) != 2:
+        return line
+
+    left, right = tokens
+    if not left.isalpha() or not right.isalpha():
+        return line
+
+    left_lower = left.lower()
+    right_lower = right.lower()
+
+    if (left_lower, right_lower) in TECH_PHRASES:
+        return line
+
+    if (right_lower, left_lower) in TECH_PHRASES:
+        return f'{right} {left}'
+
+    return line
 
 
 def _compose_text_from_results(results):
@@ -144,6 +249,8 @@ def _compose_text_from_results(results):
         ordered = sorted(line, key=lambda item: item['x'])
         line_text = ' '.join(item['text'] for item in ordered).strip()
         if line_text:
+            line_text = _normalize_short_label_noise(line_text, ordered)
+            line_text = _normalize_technical_phrase_order(line_text)
             formatted_lines.append(line_text)
             confidences.extend(item['confidence'] for item in ordered)
 
@@ -151,32 +258,92 @@ def _compose_text_from_results(results):
     if not text:
         return '', 0.0
 
-    alpha_ratio = sum(ch.isalnum() or ch.isspace() for ch in text) / max(len(text), 1)
-    score = (mean(confidences) if confidences else 0.0) * 100 + len(text) + alpha_ratio * 20
+    score = _score_text_candidate(text, confidences)
     return text, score
 
 
-def _run_ocr(image):
-    fallback_text = ''
-    for index, (_, variant) in enumerate(_prepare_fast_variants(image)):
+def _easyocr_candidates(image):
+    candidates = []
+    for index, (_, variant) in enumerate(_prepare_ocr_variants(image)):
         try:
             results = _reader.readtext(variant, **OCR_READ_KWARGS)
             text, score = _compose_text_from_results(results)
             if text:
-                if index == 0:
-                    return text
-                if score >= 28:
-                    return text
-                fallback_text = text
+                candidates.append((text, score))
+                if index == 0 and score >= FAST_OCR_SCORE:
+                    return candidates
         except Exception:
             continue
+    return candidates
 
-    if fallback_text:
-        return fallback_text
 
-    results = _reader.readtext(image, **OCR_READ_KWARGS)
-    text, _ = _compose_text_from_results(results)
-    return text
+def _tesseract_candidates(image):
+    if pytesseract is None:
+        return []
+
+    try:
+        pil_image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+    except Exception:
+        return []
+
+    try:
+        text = pytesseract.image_to_string(
+            pil_image,
+            config=TESSERACT_CONFIG,
+            lang='eng',
+        )
+        cleaned = _clean_ocr_text(text)
+        if cleaned:
+            return [(cleaned, 62.0)]
+    except Exception:
+        return []
+
+    return []
+
+
+def _select_best_candidate_detail(candidates):
+    best_text = ''
+    best_score = float('-inf')
+    seen = set()
+
+    for text, score in candidates:
+        normalized = _clean_ocr_text(text)
+        if not normalized:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        adjusted_score = score + _score_text_candidate(normalized, [])
+        if adjusted_score > best_score:
+            best_text = normalized
+            best_score = adjusted_score
+
+    return best_text, best_score
+
+
+def _select_best_candidate(candidates):
+    best_text, _ = _select_best_candidate_detail(candidates)
+    return best_text
+
+
+def _run_ocr(image):
+    candidates = _easyocr_candidates(image)
+    best_text, best_score = _select_best_candidate_detail(candidates)
+    if best_text and best_score >= FAST_OCR_SCORE:
+        return best_text
+
+    candidates.extend(_tesseract_candidates(image))
+    best_text = _select_best_candidate(candidates)
+    if best_text:
+        return best_text
+
+    try:
+        results = _reader.readtext(image, **OCR_READ_KWARGS)
+        text, _ = _compose_text_from_results(results)
+        return text
+    except Exception:
+        return ''
 
 
 def extract_text(image_path):
@@ -185,6 +352,14 @@ def extract_text(image_path):
         return _run_ocr(image)
     except Exception:
         try:
+            if pytesseract is not None:
+                try:
+                    text = pytesseract.image_to_string(image_path, config='--oem 3 --psm 6', lang='eng')
+                    cleaned = _clean_ocr_text(text)
+                    if cleaned:
+                        return cleaned
+                except Exception:
+                    pass
             results = _reader.readtext(image_path, **OCR_READ_KWARGS)
             text, _ = _compose_text_from_results(results)
             return text

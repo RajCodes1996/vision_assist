@@ -6,17 +6,17 @@
     <title>{% block title %}Vision Assist{% endblock %}</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         :root {
-            --bg-color: #0f172a; /* Slate 900 */
-            --surface-color: #1e293b; /* Slate 800 */
-            --text-primary: #f8fafc; /* Slate 50 */
-            --text-secondary: #94a3b8; /* Slate 400 */
-            --accent: #3b82f6; /* Blue 500 */
-            --accent-hover: #2563eb; /* Blue 600 */
-            --accent-glow: rgba(59, 130, 246, 0.5);
-            --border: #334155; /* Slate 700 */
+            --bg-color: #07111f;
+            --surface-color: #111c31;
+            --text-primary: #f8fafc;
+            --text-secondary: #b1bfd4;
+            --accent: #5ea0ff;
+            --accent-hover: #4385e6;
+            --accent-glow: rgba(94, 160, 255, 0.34);
+            --border: rgba(148, 163, 184, 0.18);
         }
         
         * {
@@ -34,23 +34,23 @@
             flex-direction: column;
             align-items: center;
             justify-content: center;
-            background-image: 
-                radial-gradient(at 0% 0%, hsla(253,16%,7%,1) 0, transparent 50%), 
-                radial-gradient(at 50% 0%, hsla(225,39%,30%,0.2) 0, transparent 50%), 
-                radial-gradient(at 100% 0%, hsla(339,49%,30%,0.2) 0, transparent 50%);
-            padding: 20px;
+            background-image:
+                radial-gradient(circle at top left, rgba(94, 160, 255, 0.12), transparent 32%),
+                radial-gradient(circle at top right, rgba(124, 58, 237, 0.08), transparent 28%),
+                linear-gradient(180deg, #07111f 0%, #091728 100%);
+            padding: 24px;
         }
 
         .container {
             width: 100%;
-            max-width: 800px;
-            background: rgba(30, 41, 59, 0.7);
+            max-width: 1180px;
+            background: rgba(17, 28, 49, 0.76);
             backdrop-filter: blur(12px);
             -webkit-backdrop-filter: blur(12px);
             border: 1px solid var(--border);
-            border-radius: 20px;
-            padding: 40px;
-            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            border-radius: 24px;
+            padding: clamp(20px, 3vw, 40px);
+            box-shadow: 0 30px 70px -24px rgba(0, 0, 0, 0.6);
             transition: transform 0.3s ease, box-shadow 0.3s ease;
         }
         
@@ -66,9 +66,9 @@
 
         h1 {
             font-size: 2.5rem;
-            font-weight: 700;
+            font-weight: 800;
             margin-bottom: 10px;
-            background: linear-gradient(to right, #60a5fa, #a78bfa);
+            background: linear-gradient(to right, #8dc1ff, #98a9ff);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
         }
