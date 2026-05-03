@@ -8,8 +8,8 @@
         <p class="eyebrow">Voice navigation mode</p>
         <h2>Speak to scan, tap to listen</h2>
         <p class="intro-copy">
-            Vision Assist now opens by speaking to you first. Say Start Camera, Upload Image, or Read Last Scan.
-            Tap anywhere on the screen if you want the app to listen.
+            Vision Assist now supports native Screen Readers like VoiceOver and TalkBack. 
+            Tap the "Voice Listen" button below to give a voice command like "Start Camera" or "Upload Image".
         </p>
     </section>
 
@@ -69,7 +69,7 @@
                 <li>Use bright, even lighting.</li>
                 <li>Hold the camera steady for a second.</li>
                 <li>Move closer if the text looks small.</li>
-                <li>Tap anywhere to listen, long press to repeat, and double tap to confirm the last action.</li>
+                <li>Use the Voice Listen button to speak commands.</li>
             </ul>
             <p class="camera-note">
                 Camera capture now crops the scan window before OCR, then OpenCV cleans and deskews it.
@@ -609,22 +609,13 @@
     let scanStableFrames = 0;
     let lastCrop = null;
     let autoCaptureQueued = false;
-    let voiceGuideTimer = null;
-    let voiceGuideRepeats = 0;
     let userHasInteracted = false;
     let lastAction = null;
-    let lastTouchEndAt = 0;
-    let singleTapTimer = null;
-    let longPressTimer = null;
-    let longPressTriggered = false;
-    let touchStartX = 0;
-    let touchStartY = 0;
     const framingCanvas = document.createElement('canvas');
     const framingContext = framingCanvas.getContext('2d', { willReadFrequently: true });
     const welcomePrompt = "Welcome to Vision Assist. Say Start Camera to scan a document, Upload Image to choose a file, or Read Last Scan to hear the previous result.";
-    const guidancePrompt = "Say Start Camera, Upload Image, Read Last Scan, Capture, or Scan Document. Tap anywhere to listen.";
+    const guidancePrompt = "Say Start Camera, Upload Image, Read Last Scan, Capture, or Scan Document. Press the Voice Listen button to speak.";
     const listeningPrompt = "Listening for your command. Say Start Camera, Upload Image, Read Last Scan, Capture, or Scan Document.";
-    const maxGuidanceRepeats = 3;
 
     function getCsrfToken() {
         const cookie = document.cookie.split(';').find((part) => part.trim().startsWith('csrftoken='));
@@ -661,46 +652,13 @@
         }
     }
 
-    function stopVoiceGuidanceLoop() {
-        if (voiceGuideTimer) {
-            clearTimeout(voiceGuideTimer);
-            voiceGuideTimer = null;
-        }
-    }
-
     function markInteraction() {
         userHasInteracted = true;
-        stopVoiceGuidanceLoop();
-    }
-
-    function queueVoiceGuidanceRepeat() {
-        stopVoiceGuidanceLoop();
-        if (userHasInteracted || voiceGuideRepeats >= maxGuidanceRepeats) {
-            return;
-        }
-
-        voiceGuideTimer = setTimeout(() => {
-            if (userHasInteracted || voiceGuideRepeats >= maxGuidanceRepeats) {
-                return;
-            }
-            voiceGuideRepeats += 1;
-            showVoiceState(guidancePrompt);
-            speak(guidancePrompt);
-            queueVoiceGuidanceRepeat();
-        }, 6000);
-    }
-
-    function startVoiceGuidanceLoop(resetCount = false) {
-        if (resetCount) {
-            voiceGuideRepeats = 0;
-        }
-        queueVoiceGuidanceRepeat();
     }
 
     function repeatInstructions() {
         stopSpeech();
         userHasInteracted = true;
-        stopVoiceGuidanceLoop();
         showVoiceState(guidancePrompt);
         speak(guidancePrompt);
     }
@@ -1408,77 +1366,7 @@
         }
     });
 
-    function isInteractiveTarget(target) {
-        return Boolean(target && target.closest && target.closest('button, a, input, label, textarea, select'));
-    }
 
-    function clearLongPressTimer() {
-        if (longPressTimer) {
-            clearTimeout(longPressTimer);
-            longPressTimer = null;
-        }
-    }
-
-    document.addEventListener('touchstart', (event) => {
-        if (isInteractiveTarget(event.target)) {
-            return;
-        }
-        const touch = event.changedTouches && event.changedTouches[0];
-        if (!touch) {
-            return;
-        }
-        touchStartX = touch.clientX;
-        touchStartY = touch.clientY;
-        longPressTriggered = false;
-        clearLongPressTimer();
-        longPressTimer = setTimeout(() => {
-            longPressTriggered = true;
-            repeatInstructions();
-        }, 650);
-    }, { passive: true });
-
-    document.addEventListener('touchmove', (event) => {
-        const touch = event.changedTouches && event.changedTouches[0];
-        if (!touch) {
-            return;
-        }
-        if (Math.abs(touch.clientX - touchStartX) > 12 || Math.abs(touch.clientY - touchStartY) > 12) {
-            clearLongPressTimer();
-        }
-    }, { passive: true });
-
-    document.addEventListener('touchend', (event) => {
-        if (isInteractiveTarget(event.target)) {
-            return;
-        }
-        clearLongPressTimer();
-        if (longPressTriggered) {
-            longPressTriggered = false;
-            return;
-        }
-
-        const now = Date.now();
-        if (now - lastTouchEndAt < 360) {
-            lastTouchEndAt = 0;
-            if (singleTapTimer) {
-                clearTimeout(singleTapTimer);
-                singleTapTimer = null;
-            }
-            confirmLastAction();
-            return;
-        }
-
-        lastTouchEndAt = now;
-        if (singleTapTimer) {
-            clearTimeout(singleTapTimer);
-        }
-        singleTapTimer = setTimeout(() => {
-            singleTapTimer = null;
-            startVoiceGuide();
-        }, 220);
-    }, { passive: true });
-
-    document.addEventListener('touchcancel', clearLongPressTimer, { passive: true });
 
     if ('speechSynthesis' in window) {
         window.speechSynthesis.getVoices();
@@ -1491,10 +1379,7 @@
         }
         welcomeSpoken = true;
         userHasInteracted = false;
-        voiceGuideRepeats = 0;
-        showVoiceState(welcomePrompt);
-        speak(welcomePrompt);
-        startVoiceGuidanceLoop(true);
+        // The screen reader will naturally read the page, so we don't automatically speak.
     });
 </script>
 {% endblock %}

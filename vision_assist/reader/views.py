@@ -67,56 +67,25 @@ def _load_cv_image(image_path):
     return image
 
 
-def _deskew_image(image):
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (3, 3), 0)
-    thresh = cv2.threshold(
-        blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
-    )[1]
-    coords = np.column_stack(np.where(thresh > 0))
-    if coords.size == 0:
-        return image
-
-    angle = cv2.minAreaRect(coords)[-1]
-    if angle < -45:
-        angle = -(90 + angle)
-    else:
-        angle = -angle
-
-    if abs(angle) < 0.5:
-        return image
-
-    (h, w) = image.shape[:2]
-    center = (w // 2, h // 2)
-    matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
-    return cv2.warpAffine(
-        image, matrix, (w, h),
-        flags=cv2.INTER_CUBIC,
-        borderMode=cv2.BORDER_REPLICATE,
-    )
-
-
 def _resize_for_ocr(image, min_width=1200):
     height, width = image.shape[:2]
     if width >= min_width:
         return image
     scale = min_width / float(width)
     new_size = (int(width * scale), int(height * scale))
-    return cv2.resize(image, new_size, interpolation=cv2.INTER_CUBIC)
+    return cv2.resize(image, new_size, interpolation=cv2.INTER_LANCZOS4)
 
 
 def _prepare_ocr_variants(image):
     base = _resize_for_ocr(image, min_width=1200)
-    deskewed = _deskew_image(base)
-    gray = cv2.cvtColor(deskewed, cv2.COLOR_BGR2GRAY)
+    gray = cv2.cvtColor(base, cv2.COLOR_BGR2GRAY)
 
-    clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8))
-    enhanced = clahe.apply(gray)
-    denoised = cv2.GaussianBlur(enhanced, (3, 3), 0)
+    # Use bilateral filter to remove noise while preserving text edges
+    denoised = cv2.bilateralFilter(gray, 9, 75, 75)
 
     return [
-        ('base', gray),
-        ('enhanced', enhanced),
+        ('base', base),
+        ('gray', gray),
         ('denoised', denoised),
     ]
 
@@ -207,7 +176,9 @@ def _compose_text_from_results(results):
     items = []
     for bbox, text, confidence in results:
         cleaned = text.strip()
-        if not cleaned:
+        conf_val = float(confidence or 0.0)
+        # Filter out empty text and low confidence predictions to reduce noise
+        if not cleaned or conf_val < 0.25:
             continue
         xs = [point[0] for point in bbox]
         ys = [point[1] for point in bbox]
@@ -216,7 +187,7 @@ def _compose_text_from_results(results):
             'x': min(xs),
             'y': min(ys),
             'h': max(ys) - min(ys),
-            'confidence': float(confidence or 0.0),
+            'confidence': conf_val,
         })
 
     if not items:
