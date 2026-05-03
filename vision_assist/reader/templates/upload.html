@@ -759,7 +759,7 @@
             return;
         }
 
-        if (normalized.includes('scan document') || normalized.includes('start camera') || normalized.includes('camera') || normalized === 'scan') {
+        if (normalized.includes('scan document') || normalized.includes('scan image') || normalized.includes('take a picture') || normalized.includes('start camera') || normalized.includes('camera') || normalized === 'scan') {
             startScanFlow('voice');
             registerAction('Start Camera', () => startScanFlow('voice'));
             return;
